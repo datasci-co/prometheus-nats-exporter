@@ -181,12 +181,13 @@ type channelsCollector struct {
 	servers    []*CollectedServer
 	system     string
 
-	chanBytesTotal   *prometheus.Desc
-	chanMsgsTotal    *prometheus.Desc
-	chanLastSeq      *prometheus.Desc
-	subsLastSent     *prometheus.Desc
-	subsPendingCount *prometheus.Desc
-	subsMaxInFlight  *prometheus.Desc
+	chanBytesTotal      *prometheus.Desc
+	chanMsgsTotal       *prometheus.Desc
+	chanLastSeq         *prometheus.Desc
+	subsLastSent        *prometheus.Desc
+	subsPendingCount    *prometheus.Desc
+	subsMaxInFlight     *prometheus.Desc
+	durableUnackdMsgs   *prometheus.Desc
 }
 
 func newChannelsCollector(system string, servers []*CollectedServer) prometheus.Collector {
@@ -233,6 +234,12 @@ func newChannelsCollector(system string, servers []*CollectedServer) prometheus.
 			subsVariableLabels,
 			nil,
 		),
+		durableUnackdMsgs: prometheus.NewDesc(
+			prometheus.BuildFQName(system, "chan", "durable_unackd_msgs"),
+			"Unacknowledged message count for durable subscription",
+			subsVariableLabels,
+			nil,
+		),
 	}
 
 	// create our own deep copy, and tweak the urls to be polled
@@ -255,6 +262,7 @@ func (nc *channelsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- nc.subsLastSent
 	ch <- nc.subsPendingCount
 	ch <- nc.subsMaxInFlight
+	ch <- nc.durableUnackdMsgs
 }
 
 func (nc *channelsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -273,6 +281,9 @@ func (nc *channelsCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(nc.chanLastSeq, prometheus.GaugeValue,
 				float64(channel.LastSeq), server.ID, channel.Name)
 
+			durableSubLastSent := make(map[string]float64)
+			durableSubPendingCount := make(map[string]float64)
+
 			for _, sub := range channel.Subscriptions {
 
 				// If this is a durable queue group subscription then split the
@@ -282,6 +293,8 @@ func (nc *channelsCollector) Collect(ch chan<- prometheus.Metric) {
 				if sub.IsDurable && queueName != "" {
 					subStrings := strings.Split(queueName, ":")
 					durableName, queueName = subStrings[0], subStrings[1]
+					durableSubLastSent[durableName] = float64(sub.LastSent)
+					durableSubPendingCount[durableName] = float64(sub.PendingCount)
 				}
 				labelValues := []string{server.ID, channel.Name, sub.ClientID, sub.Inbox,
 					queueName, strconv.FormatBool(sub.IsDurable), strconv.FormatBool(sub.IsOffline), durableName}
@@ -292,6 +305,20 @@ func (nc *channelsCollector) Collect(ch chan<- prometheus.Metric) {
 					float64(sub.PendingCount), labelValues...)
 				ch <- prometheus.MustNewConstMetric(nc.subsMaxInFlight, prometheus.GaugeValue,
 					float64(sub.MaxInflight), labelValues...)
+			}
+
+			for _, sub := range channel.Subscriptions {
+				durableName := sub.DurableName
+				queueName := sub.QueueName
+				if sub.IsDurable && queueName != "" {
+					subStrings := strings.Split(queueName, ":")
+					durableName, queueName = subStrings[0], subStrings[1]
+					labelValues := []string{server.ID, channel.Name, sub.ClientID, sub.Inbox,
+						queueName, strconv.FormatBool(sub.IsDurable), strconv.FormatBool(sub.IsOffline), durableName}
+					ch <- prometheus.MustNewConstMetric(nc.durableUnackdMsgs, prometheus.GaugeValue,
+						float64(channel.Msgs)-(durableSubLastSent[durableName]-
+							durableSubPendingCount[durableName]), labelValues...)
+				}
 			}
 		}
 	}
